@@ -1,0 +1,124 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: PlacePoll - Ranked voting app for travel destinations
+
+Parameters:
+  AESKey:
+    Type: String
+    Description: Base64-encoded 32-byte AES encryption key for voter tokens
+    NoEcho: true
+
+Globals:
+  Function:
+    Timeout: 10
+    MemorySize: 256
+    Runtime: provided.al2023
+    Architectures:
+      - x86_64
+
+Resources:
+  PlacePollFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: go1.x
+    Properties:
+      CodeUri: .
+      Handler: bootstrap
+      Environment:
+        Variables:
+          DYNAMODB_ENDPOINT: ""
+          AES_KEY: !Ref AESKey
+      Events:
+        VoteGet:
+          Type: Api
+          Properties:
+            Path: /vote
+            Method: get
+        VotePost:
+          Type: Api
+          Properties:
+            Path: /vote
+            Method: post
+        Results:
+          Type: Api
+          Properties:
+            Path: /results
+            Method: get
+        Links:
+          Type: Api
+          Properties:
+            Path: /links
+            Method: get
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref VotesTable
+
+  VotesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: placepoll-votes
+      AttributeDefinitions:
+        - AttributeName: voter
+          AttributeType: S
+      KeySchema:
+        - AttributeName: voter
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  # DNS and Custom Domain Resources
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: placepoll.cyou
+
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: placepoll.cyou
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: placepoll.cyou
+          HostedZoneId: !Ref HostedZone
+
+  CustomDomain:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: placepoll.cyou
+      RegionalCertificateArn: !Ref Certificate
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  BasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      DomainName: !Ref CustomDomain
+      RestApiId: !Ref ServerlessRestApi
+      Stage: Prod
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZone
+      Name: placepoll.cyou
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CustomDomain.RegionalDomainName
+        HostedZoneId: !GetAtt CustomDomain.RegionalHostedZoneId
+
+Outputs:
+  ApiUrl:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
+
+  CustomDomainUrl:
+    Description: "Custom domain URL (use this after DNS propagates)"
+    Value: !Sub "https://placepoll.cyou/"
+
+  NameServers:
+    Description: "Route53 nameservers - Update these at your domain registrar"
+    Value: !Join [", ", !GetAtt HostedZone.NameServers]
+
+  VotesTableName:
+    Description: "DynamoDB table name"
+    Value: !Ref VotesTable
