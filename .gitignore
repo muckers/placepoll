@@ -1,0 +1,26 @@
+# SAM build artifacts
+.aws-sam/
+bootstrap
+
+# Local environment config
+env.json
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test artifacts
+*.test
+*.out
+
+# Go mod cache
+go.sum
+
+# AWS console outputs
+r53.json
+
+# Claude Code project files
+.claude/
