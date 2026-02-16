@@ -427,6 +427,151 @@ func HandleLinks(ctx context.Context, dbClient *dynamodb.Client, request events.
 	}, nil
 }
 
+// HandleAdmin displays the admin dashboard
+func HandleAdmin(ctx context.Context, dbClient *dynamodb.Client, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// Extract and verify admin token
+	token, ok := request.QueryStringParameters["t"]
+	if !ok || token == "" {
+		return errorResponse(http.StatusBadRequest, "Missing token parameter"), nil
+	}
+
+	userName, err := DecryptVoterToken(token)
+	if err != nil {
+		return errorResponse(http.StatusUnauthorized, "Invalid token"), nil
+	}
+
+	if !isAdminUser(userName) {
+		return errorResponse(http.StatusForbidden, "Admin access required"), nil
+	}
+
+	// Get voting status
+	votingStatus, err := GetVotingStatus(ctx, dbClient)
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, "Failed to get voting status"), nil
+	}
+
+	// Get base URL
+	host := request.Headers["Host"]
+	if host == "" {
+		host = request.Headers["host"]
+	}
+	baseURL := "https://" + host
+	if strings.Contains(host, "execute-api") {
+		baseURL = fmt.Sprintf("%s/%s", baseURL, request.RequestContext.Stage)
+	}
+
+	// Generate admin token
+	adminToken, err := EncryptVoterToken("admin")
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, "Failed to generate admin token"), nil
+	}
+
+	// Generate voter links
+	type VoterLink struct {
+		Name string
+		URL  string
+	}
+	voterLinks := make([]VoterLink, 0, len(Voters))
+	for _, voter := range Voters {
+		voterToken, err := EncryptVoterToken(voter)
+		if err != nil {
+			continue
+		}
+		voterLinks = append(voterLinks, VoterLink{
+			Name: voter,
+			URL:  fmt.Sprintf("%s/vote?t=%s", baseURL, url.QueryEscape(voterToken)),
+		})
+	}
+
+	// Prepare template data
+	data := map[string]interface{}{
+		"VotingStatus": votingStatus,
+		"Token":        token,
+		"ResultsURL":   fmt.Sprintf("%s/results?t=%s", baseURL, url.QueryEscape(adminToken)),
+		"LinksURL":     fmt.Sprintf("%s/links?t=%s", baseURL, url.QueryEscape(adminToken)),
+		"AdminURL":     fmt.Sprintf("%s/admin?t=%s", baseURL, url.QueryEscape(token)),
+		"VoterLinks":   voterLinks,
+	}
+
+	// Render template
+	tmpl, err := template.ParseFS(templatesFS, "templates/admin.html")
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, "Template error"), nil
+	}
+
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return errorResponse(http.StatusInternalServerError, "Template execution error"), nil
+	}
+
+	return events.APIGatewayProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers: map[string]string{
+			"Content-Type": "text/html; charset=utf-8",
+		},
+		Body: buf.String(),
+	}, nil
+}
+
+// HandleAdminAction processes admin actions (close voting, schedule cutoff, reopen)
+func HandleAdminAction(ctx context.Context, dbClient *dynamodb.Client, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// Parse form data
+	formData, err := url.ParseQuery(request.Body)
+	if err != nil {
+		return errorResponse(http.StatusBadRequest, "Invalid form data"), nil
+	}
+
+	// Verify admin token
+	token := formData.Get("token")
+	if token == "" {
+		return errorResponse(http.StatusBadRequest, "Missing token"), nil
+	}
+
+	userName, err := DecryptVoterToken(token)
+	if err != nil {
+		return errorResponse(http.StatusUnauthorized, "Invalid token"), nil
+	}
+
+	if !isAdminUser(userName) {
+		return errorResponse(http.StatusForbidden, "Admin access required"), nil
+	}
+
+	// Get action
+	action := formData.Get("action")
+	switch action {
+	case "close_now":
+		if err := CloseVotingNow(ctx, dbClient); err != nil {
+			return errorResponse(http.StatusInternalServerError, "Failed to close voting"), nil
+		}
+	case "schedule_cutoff":
+		cutoffTimeStr := formData.Get("cutoff_time")
+		if cutoffTimeStr == "" {
+			return errorResponse(http.StatusBadRequest, "Missing cutoff_time"), nil
+		}
+		cutoffTime, err := time.Parse("2006-01-02T15:04", cutoffTimeStr)
+		if err != nil {
+			return errorResponse(http.StatusBadRequest, "Invalid cutoff_time format"), nil
+		}
+		if err := SetScheduledCutoff(ctx, dbClient, cutoffTime); err != nil {
+			return errorResponse(http.StatusInternalServerError, "Failed to schedule cutoff"), nil
+		}
+	case "reopen":
+		if err := ReopenVoting(ctx, dbClient); err != nil {
+			return errorResponse(http.StatusInternalServerError, "Failed to reopen voting"), nil
+		}
+	default:
+		return errorResponse(http.StatusBadRequest, "Invalid action"), nil
+	}
+
+	// Redirect back to admin page
+	return events.APIGatewayProxyResponse{
+		StatusCode: http.StatusSeeOther,
+		Headers: map[string]string{
+			"Location": fmt.Sprintf("/admin?t=%s", url.QueryEscape(token)),
+		},
+	}, nil
+}
+
 // Helper functions
 
 func isValidVoter(name string) bool {

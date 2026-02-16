@@ -49,6 +49,16 @@ Resources:
           Properties:
             Path: /links
             Method: get
+        Admin:
+          Type: Api
+          Properties:
+            Path: /admin
+            Method: get
+        AdminAction:
+          Type: Api
+          Properties:
+            Path: /admin-action
+            Method: post
       Policies:
         - DynamoDBCrudPolicy:
             TableName: !Ref VotesTable

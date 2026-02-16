@@ -46,6 +46,10 @@ func Handler(ctx context.Context, request events.APIGatewayProxyRequest) (events
 		return HandleResults(ctx, dbClient, request)
 	case method == "GET" && path == "/links":
 		return HandleLinks(ctx, dbClient, request)
+	case method == "GET" && path == "/admin":
+		return HandleAdmin(ctx, dbClient, request)
+	case method == "POST" && path == "/admin-action":
+		return HandleAdminAction(ctx, dbClient, request)
 	default:
 		return events.APIGatewayProxyResponse{
 			StatusCode: http.StatusNotFound,
