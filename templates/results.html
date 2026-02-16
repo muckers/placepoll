@@ -104,6 +104,29 @@
         .first-place .rank {
             color: #f59e0b;
         }
+        .eliminated-row {
+            opacity: 0.5;
+        }
+        .eliminated-row .rank {
+            color: #94a3b8;
+        }
+        .eliminated-row .destination-name {
+            color: #94a3b8;
+            text-decoration: line-through;
+        }
+        .eliminated-row .score {
+            color: #94a3b8;
+        }
+        .eliminated-badge {
+            display: inline-block;
+            background: #f1f5f9;
+            color: #64748b;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75em;
+            font-weight: 600;
+            margin-left: 8px;
+        }
         .stats-box {
             background: #f8fafc;
             padding: 20px;
@@ -139,6 +162,47 @@
             font-size: 1.5em;
             color: #64748b;
         }
+        details {
+            margin-top: 10px;
+        }
+        summary {
+            cursor: pointer;
+            color: #667eea;
+            font-size: 0.85em;
+            font-weight: normal;
+            user-select: none;
+        }
+        summary:hover {
+            text-decoration: underline;
+        }
+        .voter-details {
+            margin-top: 10px;
+            padding: 10px;
+            background: #f8fafc;
+            border-radius: 6px;
+            font-size: 0.9em;
+            font-weight: normal;
+        }
+        .voter-score {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            color: #64748b;
+        }
+        .voter-score span:last-child {
+            font-weight: 600;
+            color: #334155;
+        }
+        .dealbreaker-badge {
+            display: inline-block;
+            background: #fee2e2;
+            color: #991b1b;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.75em;
+            font-weight: 600;
+            margin-left: 8px;
+        }
     </style>
 </head>
 <body>
@@ -163,9 +227,34 @@
             </thead>
             <tbody>
                 {{range $result := .Results}}
-                <tr {{if eq $result.Rank 1}}class="first-place"{{end}}>
-                    <td class="rank">#{{$result.Rank}}</td>
-                    <td class="destination-name">{{$result.Name}}</td>
+                <tr {{if $result.Eliminated}}class="eliminated-row"{{else if eq $result.Rank 1}}class="first-place"{{end}}>
+                    <td class="rank">
+                        {{if $result.Eliminated}}
+                            —
+                        {{else}}
+                            #{{$result.Rank}}
+                        {{end}}
+                    </td>
+                    <td class="destination-name">
+                        <div>
+                            {{$result.Name}}
+                            {{if $result.Eliminated}}<span class="eliminated-badge">ELIMINATED</span>{{end}}
+                        </div>
+                        <details>
+                            <summary>Show voter details</summary>
+                            <div class="voter-details">
+                                {{range $vs := $result.VoterScores}}
+                                <div class="voter-score">
+                                    <span>
+                                        {{$vs.Voter}}
+                                        {{if $vs.IsDealbreaker}}<span class="dealbreaker-badge">DEALBREAKER</span>{{end}}
+                                    </span>
+                                    <span>{{$vs.Score}}</span>
+                                </div>
+                                {{end}}
+                            </div>
+                        </details>
+                    </td>
                     <td class="score">{{$result.Score}}</td>
                 </tr>
                 {{end}}

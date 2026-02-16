@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -78,6 +79,16 @@ func HandleVoteGet(ctx context.Context, dbClient *dynamodb.Client, request event
 
 // HandleVotePost processes vote submission
 func HandleVotePost(ctx context.Context, dbClient *dynamodb.Client, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// Check if voting is open
+	votingStatus, err := GetVotingStatus(ctx, dbClient)
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, "Failed to check voting status"), nil
+	}
+
+	if !votingStatus.IsOpen {
+		return errorResponse(http.StatusForbidden, "Voting has been closed"), nil
+	}
+
 	// Parse form data
 	formData, err := url.ParseQuery(request.Body)
 	if err != nil {
@@ -137,12 +148,27 @@ func HandleVotePost(ctx context.Context, dbClient *dynamodb.Client, request even
 		return errorResponse(http.StatusInternalServerError, "Failed to save vote"), nil
 	}
 
-	// Redirect to results
+	// Show confirmation page
+	tmpl, err := template.ParseFS(templatesFS, "templates/confirmation.html")
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, "Template error"), nil
+	}
+
+	data := map[string]interface{}{
+		"Voter": voterName,
+	}
+
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return errorResponse(http.StatusInternalServerError, "Template execution error"), nil
+	}
+
 	return events.APIGatewayProxyResponse{
-		StatusCode: http.StatusSeeOther,
+		StatusCode: http.StatusOK,
 		Headers: map[string]string{
-			"Location": "/results",
+			"Content-Type": "text/html; charset=utf-8",
 		},
+		Body: buf.String(),
 	}, nil
 }
 
@@ -177,20 +203,116 @@ func HandleResults(ctx context.Context, dbClient *dynamodb.Client, request event
 		winner = results[0].Name
 	}
 
-	// Add ranks to results
-	type RankedResult struct {
-		Rank  int
-		Name  string
-		Score int
-	}
-	rankedResults := make([]RankedResult, len(results))
-	for i, r := range results {
-		rankedResults[i] = RankedResult{
-			Rank:  i + 1,
-			Name:  r.Name,
-			Score: r.Score,
+	// Collect all dealbreakers
+	eliminatedDestinations := make(map[string]bool)
+	for _, vote := range votes {
+		for _, db := range vote.Dealbreakers {
+			eliminatedDestinations[db] = true
 		}
 	}
+
+	// Build complete results including eliminated destinations
+	type VoterScore struct {
+		Voter        string
+		Score        int
+		IsDealbreaker bool
+	}
+	type RankedResult struct {
+		Rank        int
+		Name        string
+		Score       int
+		VoterScores []VoterScore
+		Eliminated  bool
+	}
+
+	// Add valid results first
+	rankedResults := make([]RankedResult, 0)
+	for i, r := range results {
+		// Collect individual voter scores for this destination
+		voterScores := make([]VoterScore, 0)
+		for _, vote := range votes {
+			if score, ok := vote.Scores[r.Name]; ok {
+				// Check if this destination is a dealbreaker for this voter
+				isDealbreaker := false
+				for _, db := range vote.Dealbreakers {
+					if db == r.Name {
+						isDealbreaker = true
+						break
+					}
+				}
+
+				voterScores = append(voterScores, VoterScore{
+					Voter:        vote.Voter,
+					Score:        score,
+					IsDealbreaker: isDealbreaker,
+				})
+			}
+		}
+
+		rankedResults = append(rankedResults, RankedResult{
+			Rank:        i + 1,
+			Name:        r.Name,
+			Score:       r.Score,
+			VoterScores: voterScores,
+			Eliminated:  false,
+		})
+	}
+
+	// Add eliminated destinations at the end
+	for dest := range eliminatedDestinations {
+		// Skip if already in results (shouldn't happen, but safety check)
+		found := false
+		for _, r := range rankedResults {
+			if r.Name == dest {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+
+		// Calculate score and collect voter details for eliminated destination
+		totalScore := 0
+		voterScores := make([]VoterScore, 0)
+		for _, vote := range votes {
+			if score, ok := vote.Scores[dest]; ok {
+				totalScore += score
+				isDealbreaker := false
+				for _, db := range vote.Dealbreakers {
+					if db == dest {
+						isDealbreaker = true
+						break
+					}
+				}
+				voterScores = append(voterScores, VoterScore{
+					Voter:        vote.Voter,
+					Score:        score,
+					IsDealbreaker: isDealbreaker,
+				})
+			}
+		}
+
+		rankedResults = append(rankedResults, RankedResult{
+			Rank:        0, // No rank for eliminated
+			Name:        dest,
+			Score:       totalScore,
+			VoterScores: voterScores,
+			Eliminated:  true,
+		})
+	}
+
+	// Sort eliminated destinations by score (descending) for consistent ordering
+	sort.SliceStable(rankedResults, func(i, j int) bool {
+		// Keep non-eliminated at top, sort eliminated by score
+		if rankedResults[i].Eliminated == rankedResults[j].Eliminated {
+			if rankedResults[i].Eliminated {
+				return rankedResults[i].Score > rankedResults[j].Score
+			}
+			return rankedResults[i].Rank < rankedResults[j].Rank
+		}
+		return !rankedResults[i].Eliminated
+	})
 
 	// Render results template
 	tmpl, err := template.ParseFS(templatesFS, "templates/results.html")
@@ -323,6 +445,149 @@ func isAdminUser(name string) bool {
 		}
 	}
 	return false
+}
+
+// HandleAdmin displays the admin dashboard
+func HandleAdmin(ctx context.Context, dbClient *dynamodb.Client, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// Require admin token
+	token, ok := request.QueryStringParameters["t"]
+	if !ok || token == "" {
+		return errorResponse(http.StatusUnauthorized, "Admin token required"), nil
+	}
+
+	// Decrypt and verify admin token
+	userName, err := DecryptVoterToken(token)
+	if err != nil {
+		return errorResponse(http.StatusUnauthorized, "Invalid token"), nil
+	}
+
+	if !isAdminUser(userName) {
+		return errorResponse(http.StatusForbidden, "Admin access required"), nil
+	}
+
+	// Get voting status
+	votingStatus, err := GetVotingStatus(ctx, dbClient)
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, "Failed to get voting status"), nil
+	}
+
+	// Get base URL from request
+	host := request.Headers["Host"]
+	if host == "" {
+		host = request.Headers["host"]
+	}
+
+	baseURL := "https://" + host
+	if strings.Contains(host, "execute-api") {
+		baseURL = fmt.Sprintf("%s/%s", baseURL, request.RequestContext.Stage)
+	}
+
+	// Generate voter links
+	type VoterLink struct {
+		Name string
+		URL  string
+	}
+
+	voterLinks := make([]VoterLink, 0, len(Voters))
+	for _, voter := range Voters {
+		voterToken, err := EncryptVoterToken(voter)
+		if err != nil {
+			continue
+		}
+		voterLinks = append(voterLinks, VoterLink{
+			Name: voter,
+			URL:  fmt.Sprintf("%s/vote?t=%s", baseURL, url.QueryEscape(voterToken)),
+		})
+	}
+
+	// Generate admin links
+	resultsURL := fmt.Sprintf("%s/results?t=%s", baseURL, url.QueryEscape(token))
+	linksURL := fmt.Sprintf("%s/links?t=%s", baseURL, url.QueryEscape(token))
+	adminURL := fmt.Sprintf("%s/admin?t=%s", baseURL, url.QueryEscape(token))
+
+	// Render admin template
+	tmpl, err := template.ParseFS(templatesFS, "templates/admin.html")
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, "Template error"), nil
+	}
+
+	data := map[string]interface{}{
+		"VoterLinks":       voterLinks,
+		"ResultsURL":       resultsURL,
+		"LinksURL":         linksURL,
+		"AdminURL":         adminURL,
+		"VotingStatus":     votingStatus,
+		"Token":            token,
+	}
+
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return errorResponse(http.StatusInternalServerError, "Template execution error"), nil
+	}
+
+	return events.APIGatewayProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers: map[string]string{
+			"Content-Type": "text/html; charset=utf-8",
+		},
+		Body: buf.String(),
+	}, nil
+}
+
+// HandleAdminAction processes admin actions (close voting, schedule cutoff, reopen)
+func HandleAdminAction(ctx context.Context, dbClient *dynamodb.Client, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// Require admin token
+	formData, err := url.ParseQuery(request.Body)
+	if err != nil {
+		return errorResponse(http.StatusBadRequest, "Invalid form data"), nil
+	}
+
+	token := formData.Get("token")
+	if token == "" {
+		return errorResponse(http.StatusBadRequest, "Missing token"), nil
+	}
+
+	userName, err := DecryptVoterToken(token)
+	if err != nil {
+		return errorResponse(http.StatusUnauthorized, "Invalid token"), nil
+	}
+
+	if !isAdminUser(userName) {
+		return errorResponse(http.StatusForbidden, "Admin access required"), nil
+	}
+
+	// Process action
+	action := formData.Get("action")
+	switch action {
+	case "close_now":
+		err = CloseVotingNow(ctx, dbClient)
+	case "schedule_cutoff":
+		cutoffStr := formData.Get("cutoff_time")
+		if cutoffStr == "" {
+			return errorResponse(http.StatusBadRequest, "Missing cutoff_time"), nil
+		}
+		cutoffTime, err := time.Parse("2006-01-02T15:04", cutoffStr)
+		if err != nil {
+			return errorResponse(http.StatusBadRequest, "Invalid cutoff_time format"), nil
+		}
+		err = SetScheduledCutoff(ctx, dbClient, cutoffTime)
+	case "reopen":
+		err = ReopenVoting(ctx, dbClient)
+	default:
+		return errorResponse(http.StatusBadRequest, "Invalid action"), nil
+	}
+
+	if err != nil {
+		return errorResponse(http.StatusInternalServerError, "Failed to process action"), nil
+	}
+
+	// Redirect back to admin page
+	return events.APIGatewayProxyResponse{
+		StatusCode: http.StatusSeeOther,
+		Headers: map[string]string{
+			"Location": fmt.Sprintf("/admin?t=%s", url.QueryEscape(token)),
+		},
+	}, nil
 }
 
 func errorResponse(statusCode int, message string) events.APIGatewayProxyResponse {
