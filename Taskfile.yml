@@ -12,14 +12,45 @@ tasks:
     preconditions:
       - sh: test -f samconfig.toml
         msg: "samconfig.toml not found. Run 'task deploy:guided' first for initial setup."
+      - sh: test -f env.json
+        msg: "env.json not found. Run 'task admin:init' first to generate encryption key."
+      - sh: command -v jq >/dev/null 2>&1
+        msg: "jq is required but not installed. Install with: sudo apt install jq (or brew install jq on macOS)"
     cmds:
-      - sam deploy
+      - |
+        KEY=$(jq -r '.PlacePollFunction.AES_KEY' env.json)
+        sam deploy --parameter-overrides "AESKey=$KEY"
+
+  deploy:yes:
+    desc: Deploy to AWS without confirmation prompt
+    deps: [build]
+    preconditions:
+      - sh: test -f samconfig.toml
+        msg: "samconfig.toml not found. Run 'task deploy:guided' first for initial setup."
+      - sh: test -f env.json
+        msg: "env.json not found. Run 'task admin:init' first to generate encryption key."
+      - sh: command -v jq >/dev/null 2>&1
+        msg: "jq is required but not installed. Install with: sudo apt install jq (or brew install jq on macOS)"
+    cmds:
+      - |
+        KEY=$(jq -r '.PlacePollFunction.AES_KEY' env.json)
+        sam deploy --parameter-overrides "AESKey=$KEY" --no-confirm-changeset
 
   deploy:guided:
     desc: Deploy with guided prompts (first time setup)
     deps: [build]
+    preconditions:
+      - sh: test -f env.json
+        msg: "env.json not found. Run 'task admin:init' first to generate encryption key."
+      - sh: command -v jq >/dev/null 2>&1
+        msg: "jq is required but not installed. Install with: sudo apt install jq (or brew install jq on macOS)"
     cmds:
-      - sam deploy --guided
+      - |
+        KEY=$(jq -r '.PlacePollFunction.AES_KEY' env.json)
+        echo "Using AES key from env.json"
+        echo "When prompted for 'AESKey', enter: $KEY"
+        echo ""
+        sam deploy --guided --parameter-overrides "AESKey=$KEY"
 
   local:start:
     desc: Start local development environment (DynamoDB Local + SAM)
@@ -70,6 +101,7 @@ tasks:
   local:stop:
     desc: Stop local development environment
     cmds:
+      - pkill -f "sam local start-api" || true
       - docker-compose down
 
   validate:
@@ -93,15 +125,39 @@ tasks:
     cmds:
       - sam delete
 
+  db:clear:
+    desc: Clear all votes from production DynamoDB table
+    prompt: This will DELETE ALL VOTES from production. Are you sure?
+    cmds:
+      - |
+        echo "Current votes in database:"
+        aws dynamodb scan \
+          --table-name placepoll-votes \
+          --region us-east-2 \
+          --select COUNT \
+          --output text | awk '{print "  Total votes: " $1}'
+        echo ""
+        echo "Clearing production database..."
+        for voter in Lesley Casey Ron; do
+          aws dynamodb delete-item \
+            --table-name placepoll-votes \
+            --key '{"voter":{"S":"'$voter'"}}' \
+            --region us-east-2 2>/dev/null && echo "  Deleted vote for $voter" || echo "  No vote found for $voter"
+        done
+        echo ""
+        echo "Verifying database is empty..."
+        COUNT=$(aws dynamodb scan --table-name placepoll-votes --region us-east-2 --select COUNT --output text | awk '{print $1}')
+        echo "  Remaining votes: $COUNT"
+        if [ "$COUNT" = "0" ]; then
+          echo "✓ Database successfully cleared!"
+        else
+          echo "⚠ Warning: $COUNT votes still remain in database"
+        fi
+
   links:
     desc: Generate voter links (requires deployed API)
     cmds:
       - echo "After deployment, call GET /links to generate voter tokens"
-
-  generate-key:
-    desc: Generate a new AES-256 encryption key
-    cmds:
-      - go run ./cmd/genkey
 
   generate-admin-token:
     desc: Generate an admin token for accessing /results and /links
@@ -117,13 +173,25 @@ tasks:
       - sh: command -v jq >/dev/null 2>&1
         msg: "jq is required but not installed. Install with: sudo apt install jq (or brew install jq on macOS)"
     cmds:
-      - task: generate-key
       - |
+        echo "Generating new AES-256 key..."
         test -f env.json || cp env.example.json env.json
         KEY=$(go run ./cmd/genkey 2>&1 | grep 'export AES_KEY=' | cut -d'"' -f2)
+        echo "Generated key: $KEY"
+        echo ""
+        echo "Updating env.json..."
         jq '.PlacePollFunction.AES_KEY = "'$KEY'"' env.json > env.json.tmp && mv env.json.tmp env.json
+        echo "Updated env.json with new key"
+        echo ""
+        echo "Generating admin token..."
         export AES_KEY="$KEY"
-      - task: generate-admin-token
+        go run ./cmd/gentoken
+        echo ""
+        echo "Setup complete! Your env.json has been configured."
+        echo ""
+        echo "To generate additional admin tokens later, run:"
+        echo "  export AES_KEY=\"$KEY\""
+        echo "  task generate-admin-token"
 
   help:
     desc: Show available tasks
