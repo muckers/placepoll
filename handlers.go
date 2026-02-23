@@ -276,21 +276,28 @@ func HandleResults(ctx context.Context, dbClient *dynamodb.Client, request event
 		totalScore := 0
 		voterScores := make([]VoterScore, 0)
 		for _, vote := range votes {
-			if score, ok := vote.Scores[dest]; ok {
-				totalScore += score
-				isDealbreaker := false
-				for _, db := range vote.Dealbreakers {
-					if db == dest {
-						isDealbreaker = true
-						break
-					}
+			// Check if this voter marked this destination as a dealbreaker
+			isDealbreaker := false
+			for _, db := range vote.Dealbreakers {
+				if db == dest {
+					isDealbreaker = true
+					break
 				}
-				voterScores = append(voterScores, VoterScore{
-					Voter:        vote.Voter,
-					Score:        score,
-					IsDealbreaker: isDealbreaker,
-				})
 			}
+
+			// Get score (0 if they didn't score it)
+			score := 0
+			if s, ok := vote.Scores[dest]; ok {
+				score = s
+				totalScore += score
+			}
+
+			// Include all voters for eliminated destinations
+			voterScores = append(voterScores, VoterScore{
+				Voter:        vote.Voter,
+				Score:        score,
+				IsDealbreaker: isDealbreaker,
+			})
 		}
 
 		rankedResults = append(rankedResults, RankedResult{

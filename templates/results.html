@@ -249,7 +249,13 @@
                                         {{$vs.Voter}}
                                         {{if $vs.IsDealbreaker}}<span class="dealbreaker-badge">DEALBREAKER</span>{{end}}
                                     </span>
-                                    <span>{{$vs.Score}}</span>
+                                    <span>
+                                        {{if $vs.IsDealbreaker}}
+                                            <span style="text-decoration: line-through;">{{$vs.Score}}</span> ✖
+                                        {{else}}
+                                            {{$vs.Score}}
+                                        {{end}}
+                                    </span>
                                 </div>
                                 {{end}}
                             </div>
