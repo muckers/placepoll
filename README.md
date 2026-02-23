@@ -27,49 +27,6 @@ PlacePoll allows a group of friends to vote on travel destinations using a ranke
 - **DNS:** Route53 with ACM certificate
 - **Testing:** Go standard testing + Rod browser automation
 
-## Architecture
-
-```
-┌─────────────┐
-│   Route53   │ placepoll.cyou
-└──────┬──────┘
-       │
-┌──────▼──────────────┐
-│  API Gateway        │
-│  Custom Domain      │
-└──────┬──────────────┘
-       │
-┌──────▼──────────────┐
-│  Lambda Function    │
-│  (Go Handler)       │
-└──────┬──────────────┘
-       │
-┌──────▼──────────────┐
-│  DynamoDB Table     │
-│  placepoll-votes    │
-└─────────────────────┘
-```
-
-## Project Structure
-
-```
-placepoll/
-├── main.go              # Lambda entry point and router
-├── config.go            # Destinations, voters, and encryption key
-├── crypto.go            # AES-256-GCM token encryption/decryption
-├── db.go                # DynamoDB operations
-├── tally.go             # Vote tallying and winner calculation
-├── handlers.go          # HTTP request handlers
-├── templates/
-│   ├── vote.html        # Voting form interface
-│   └── results.html     # Results dashboard
-├── template.yaml        # AWS SAM infrastructure definition
-├── Taskfile.yml         # Task runner commands
-├── docker-compose.yml   # Local DynamoDB for testing
-└── cmd/
-    └── gentoken/        # Admin token generator utility
-```
-
 ## Local Development
 
 ### Prerequisites
@@ -293,11 +250,17 @@ The Taskfile automatically verifies prerequisites before running tasks. If a req
 | Task | Prerequisite Checked | Error Message Guidance |
 |------|---------------------|------------------------|
 | `admin:init` | `jq` command installed | Install command provided |
-| `generate-admin-token` | `AES_KEY` env var set | Suggests running `admin:init` |
+| `generate-admin-token` | `AES_KEY` env var set | Directs to check env.json or run `admin:init` |
 | `deploy` | `samconfig.toml` exists | Directs to `deploy:guided` |
+| `deploy` | `env.json` exists | Directs to `admin:init` |
+| `deploy` | `jq` installed | Install command provided |
 | `deploy` | Runs `build` first | Automatic dependency |
+| `deploy` | Auto-reads AES key | From env.json |
+| `deploy:guided` | `env.json` exists | Directs to `admin:init` |
+| `deploy:guided` | `jq` installed | Install command provided |
 | `deploy:guided` | Runs `build` first | Automatic dependency |
-| `local:start` | `env.json` exists | Suggests running `admin:init` |
+| `deploy:guided` | Auto-reads AES key | Pre-fills parameter from env.json |
+| `local:start` | `env.json` exists | Directs to `admin:init` |
 | `local:start` | Runs `local:db` first | Automatic dependency |
 | `local:db` | Docker running | Clear Docker startup message |
 | `local:create-table` | DynamoDB on port 8000 | Directs to `local:db` |
@@ -313,12 +276,12 @@ The Taskfile automatically verifies prerequisites before running tasks. If a req
 #### `task admin:init`
 **Initialize admin setup (first-time setup)**
 
-Complete initialization for a new installation:
-1. Generates a new AES-256 encryption key
+Complete automated initialization for a new installation:
+1. Generates a cryptographically secure AES-256 encryption key
 2. Creates/updates `env.json` with the new key
 3. Generates an admin token for accessing protected endpoints
 
-Use this when setting up the project for the first time or when you need to rotate the encryption key.
+**This is the ONLY command you need to run for initial setup.** Everything is automated - no manual copying of keys or environment variables required.
 
 ```bash
 task admin:init
@@ -328,28 +291,28 @@ task admin:init
 - `jq` command-line JSON processor (checked automatically)
   - Install: `sudo apt install jq` (Linux) or `brew install jq` (macOS)
 
-**Note:** This is typically the first command you run after cloning the repo.
+**Output:**
+- Displays the generated key (also saved to env.json)
+- Displays the admin token for immediate use
+- Updates env.json automatically
 
-#### `task generate-key`
-**Generate a new AES-256 encryption key**
+**Use cases:**
+- First-time project setup after cloning
+- Rotating encryption keys
+- Resetting local development environment
 
-Creates a cryptographically secure 32-byte key for AES-256-GCM encryption. Outputs the key in base64 format for use in environment variables.
-
-```bash
-task generate-key
-```
-
-**Output:** Displays the generated key in multiple formats (raw base64, export statement, JSON format).
-
-**Use case:** When you need to manually generate a new key without updating env.json, or when rotating keys for production deployment.
+**Note:** Run this after cloning the repo, before `task local:start` or any deployment.
 
 #### `task generate-admin-token`
 **Generate an admin authentication token**
 
 Creates an encrypted token that grants access to admin-only endpoints (`/results` and `/links`). Requires `AES_KEY` environment variable to be set.
 
+**Note:** You typically don't need to run this manually - `task admin:init` already generates an admin token for you.
+
 ```bash
-export AES_KEY="your-base64-key"
+# Get the key from env.json and export it
+export AES_KEY="your-base64-key-from-env-json"
 task generate-admin-token
 ```
 
@@ -357,9 +320,12 @@ task generate-admin-token
 - `AES_KEY` environment variable must be set (checked automatically)
 - The key must match what's deployed (for production) or in env.json (for local)
 
-**Output:** Admin token and example URLs for accessing protected endpoints.
+**Use cases:**
+- Generating a fresh admin token without rotating the key
+- Creating tokens for different administrators
+- Regenerating a token if the previous one was compromised
 
-**Note:** If `AES_KEY` is not set, the task will fail with a helpful error message. Run `task admin:init` to set up everything automatically.
+**Output:** Admin token and example URLs for accessing protected endpoints.
 
 ### Build & Deployment
 
@@ -395,19 +361,25 @@ task deploy:guided
 **Prerequisites:**
 - AWS CLI configured with credentials
 - AWS SAM CLI installed
-- Generated AES key (run `task generate-key` first)
+- `env.json` with AES key (checked automatically)
+  - Run `task admin:init` first if not done yet
+- `jq` installed (checked automatically)
 
 **Automatically runs:** `task build` (enforced via task dependency)
 
-**What it prompts for:**
-- Stack name (default: `placepoll`)
-- AWS Region (e.g., `us-east-2`)
-- **AES_KEY parameter** (your base64-encoded encryption key)
-- Confirmation before creating/updating resources
-- IAM role creation permissions
-- Save configuration to samconfig.toml
+**What it does:**
+- Reads AES key from env.json automatically
+- Pre-fills the AESKey parameter (just press Enter to accept)
+- Prompts for other configuration:
+  - Stack name (default: `placepoll`)
+  - AWS Region (e.g., `us-east-2`)
+  - Confirmation before creating/updating resources
+  - IAM role creation permissions
+  - Save configuration to samconfig.toml
 
 **Duration:** 5-10 minutes for initial deployment (includes Route53, ACM certificate, custom domain setup).
+
+**Note:** The AES key is automatically read from env.json - you don't need to manually copy/paste it!
 
 #### `task deploy`
 **Deploy to AWS (subsequent deployments)**
@@ -420,18 +392,23 @@ task deploy
 
 **Prerequisites:**
 - `samconfig.toml` must exist (checked automatically)
+- `env.json` must exist with AES key (checked automatically)
+- `jq` installed (checked automatically)
 - Must have run `deploy:guided` at least once
 
 **Automatically runs:** `task build` (enforced via task dependency)
+
+**What it does:**
+- Reads AES key from env.json automatically
+- Uses saved configuration from samconfig.toml
+- Deploys with no prompts (unless changeset needs confirmation)
 
 **Duration:** 2-3 minutes for updates (infrastructure already exists).
 
 **What it deploys:**
 - Lambda function with latest code changes
 - Updates to infrastructure (if template.yaml changed)
-- Environment variables (including AES_KEY if changed)
-
-**Note:** If `samconfig.toml` is missing, the task will fail with a message to run `task deploy:guided` first.
+- Environment variables (AES_KEY automatically passed from env.json)
 
 #### `task validate`
 **Validate the SAM template**
@@ -739,30 +716,26 @@ task local:start
 
 ### First-Time Deployment (AWS)
 ```bash
-# 1. Generate encryption key
-task generate-key
-# Save the output - you'll need it for deployment
+# 1. Initialize admin setup (generates key and admin token)
+task admin:init
 
 # 2. Build and deploy with guided prompts
-#    Automatically builds the application first
+#    Automatically reads AES key from env.json
+#    Just press Enter when prompted for AESKey parameter
 task deploy:guided
-# Enter the key when prompted for AES_KEY parameter
 
 # 3. Update nameservers at your domain registrar
 # (use NS records from CloudFormation outputs)
 
-# 4. Generate admin token for production
-export AES_KEY="your-production-key"
-#    Automatically checks AES_KEY is set before running
-task generate-admin-token
-
-# 5. Get voter links
+# 4. Get voter links (use the admin token from step 1)
 curl "https://placepoll.cyou/links?t=YOUR_ADMIN_TOKEN"
 ```
 
 **Prerequisite checks performed automatically:**
-- Step 2: Automatically runs `task build` before deploying
-- Step 4: Verifies `AES_KEY` environment variable is set
+- Step 1: Verifies `jq` is installed
+- Step 2: Verifies `env.json` exists, reads AES key automatically, runs `task build`
+
+**Note:** The AES key from env.json is automatically used for deployment - no manual copying required!
 
 ### Making Code Changes
 ```bash
@@ -774,7 +747,7 @@ task local:start
 # Test your changes at http://localhost:3000
 
 # 3. Deploy to AWS
-#    Automatically builds and checks samconfig.toml exists
+#    Automatically reads AES key from env.json
 task deploy
 
 # 4. Monitor logs if needed
@@ -783,22 +756,16 @@ task logs
 
 **Prerequisite checks performed automatically:**
 - Step 2: Verifies Docker is running and env.json exists
-- Step 3: Runs `task build` and verifies samconfig.toml exists
+- Step 3: Runs `task build`, verifies samconfig.toml and env.json exist, auto-reads AES key
 
 ### Rotating Encryption Keys
 ```bash
-# 1. Generate new key
-task generate-key
+# 1. Generate new key and admin token (all automated)
+task admin:init
+# This updates env.json and gives you a new admin token
 
-# 2. Update local env.json manually with new key
-
-# 3. Redeploy with new key
-task deploy:guided
-# Enter the new key when prompted
-
-# 4. Generate new admin token
-export AES_KEY="new-key"
-task generate-admin-token
+# 2. Redeploy with new key (automatically reads from env.json)
+task deploy
 
 # Note: Old voter links will be invalid after key rotation
 ```
