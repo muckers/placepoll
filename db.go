@@ -72,7 +72,11 @@ func GetVote(ctx context.Context, client *dynamodb.Client, voter string) (*Vote,
 // ListAllVotes retrieves all votes from DynamoDB
 func ListAllVotes(ctx context.Context, client *dynamodb.Client) ([]*Vote, error) {
 	result, err := client.Scan(ctx, &dynamodb.ScanInput{
-		TableName: aws.String(TableName),
+		TableName:        aws.String(TableName),
+		FilterExpression: aws.String("voter <> :status_key"),
+		ExpressionAttributeValues: map[string]types.AttributeValue{
+			":status_key": &types.AttributeValueMemberS{Value: "_voting_status"},
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan votes: %w", err)
