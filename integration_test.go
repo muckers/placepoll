@@ -187,8 +187,14 @@ func TestIntegration_MultipleVoters(t *testing.T) {
 		submitBtn := page.MustElement("button[type=submit]")
 		submitBtn.MustClick()
 
-		// Wait for redirect to results page
-		time.Sleep(2 * time.Second)
+		// Wait for confirmation page to load
+		time.Sleep(1 * time.Second)
+
+		// Verify confirmation page is displayed
+		confirmation := page.MustElement("h1").MustText()
+		if confirmation != "Vote Submitted!" {
+			t.Errorf("Expected confirmation page, got: %s", confirmation)
+		}
 
 		t.Logf("Vote submitted successfully for %s", voterLink.Name)
 	}
