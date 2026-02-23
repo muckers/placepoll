@@ -167,6 +167,32 @@ tasks:
     cmds:
       - go run ./cmd/gentoken
 
+  admin:urls:
+    desc: Display all admin URLs for production
+    preconditions:
+      - sh: test -f env.json
+        msg: "env.json not found. Run 'task admin:init' to generate encryption key and setup."
+      - sh: '[ -n "$(jq -r ".PlacePollFunction.AES_KEY // empty" env.json 2>/dev/null)" ]'
+        msg: "AES_KEY not found in env.json. Run 'task admin:init' to generate encryption key."
+    cmds:
+      - |
+        export AES_KEY=$(jq -r '.PlacePollFunction.AES_KEY' env.json)
+        TOKEN=$(go run ./cmd/gentoken 2>&1 | grep "Admin token:" | awk '{print $3}')
+        echo ""
+        echo "==================== Admin URLs ===================="
+        echo ""
+        echo "Admin Dashboard:"
+        echo "  https://placepoll.cyou/admin?t=$TOKEN"
+        echo ""
+        echo "Results Page:"
+        echo "  https://placepoll.cyou/results?t=$TOKEN"
+        echo ""
+        echo "Links API (JSON):"
+        echo "  https://placepoll.cyou/links?t=$TOKEN"
+        echo ""
+        echo "===================================================="
+        echo ""
+
   admin:init:
     desc: Initialize admin setup (generate key, update env.json, generate admin token)
     preconditions:
