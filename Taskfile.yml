@@ -123,7 +123,7 @@ tasks:
   delete:
     desc: Delete the CloudFormation stack
     cmds:
-      - sam delete
+      - sam delete --debug
 
   db:clear:
     desc: Clear all votes from production DynamoDB table
